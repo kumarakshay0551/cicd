@@ -8,7 +8,7 @@ on:
     inputs:
       actions:
         description: "Action Options"
-        default: "terraform"
+        default: "docker"
         type: choice
         options:
           - terraform
