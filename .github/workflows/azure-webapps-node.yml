@@ -29,6 +29,14 @@ on:
         options:
           - build
           - push
+      kubernetes_option:
+        description: "Kubernetes option"
+        default: "deploy"
+        type: choice
+        options:
+          - deploy
+          - scale
+          - delete
       environment:
         description: "Environment to deploy applications to"
         default: "qa"
@@ -120,7 +128,7 @@ jobs:
           docker push ${{ needs.terraform-execute.outputs.ACR_REPO }}/my-app:${{ github.sha }}
 
   kubernetes-deploy:
-    name: Deploy to Kubernetes
+    name: Kubernetes Actions
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.action == 'kubernetes' }}
     environment: "${{ github.event.inputs.environment }}"
@@ -141,6 +149,12 @@ jobs:
           cluster-name: ${{ env.CLUSTER_NAME }}
           resource-group: ${{ env.RESOURCE_GROUP }}
 
-      - name: Deploy to AKS
+      - name: Kubernetes ${{ github.event.inputs.kubernetes_option }}
         run: |
-          kubectl set image deployment/my-app my-app=${{ needs.terraform-execute.outputs.ACR_REPO }}/my-app:${{ github.sha }}
+          if [ "${{ github.event.inputs.kubernetes_option }}" == "deploy" ]; then
+            kubectl apply -f k8s/deployment.yaml
+          elif [ "${{ github.event.inputs.kubernetes_option }}" == "scale" ]; then
+            kubectl scale deployment my-app --replicas=3
+          elif [ "${{ github.event.inputs.kubernetes_option }}" == "delete" ]; then
+            kubectl delete -f k8s/deployment.yaml
+          fi
