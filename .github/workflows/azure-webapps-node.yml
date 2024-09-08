@@ -6,15 +6,15 @@ on:
     - cron: "0 6 * * 1-5"
   workflow_dispatch:
     inputs:
-      # actions:
-      #   description: "Action Options"
-      #   default: "all"
-      #   type: choice
-      #   options:
-      #     - terraform
-      #     - docker-image
-      #     - kustomize
-      #     - all
+        actions:
+         description: "Action Options"
+         default: "all"
+         type: choice
+         options:
+           - terraform
+           - docker-image
+           - kustomize
+           - all
       option:
         description: "Terraform option"
         default: "apply"
