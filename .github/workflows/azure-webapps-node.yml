@@ -6,37 +6,23 @@ on:
     - cron: "0 6 * * 1-5"
   workflow_dispatch:
     inputs:
-      action:
-        description: "Select the action to perform"
+      actions:
+        description: "Action Options"
         default: "terraform"
         type: choice
         options:
           - terraform
           - docker
-          - kubernetes
-      terraform_option:
-        description: "Terraform option"
+      option:
+        description: "Action-specific option"
         default: "apply"
         type: choice
         options:
-          - plan
-          - apply
-          - destroy
-      docker_option:
-        description: "Docker option"
-        default: "build"
-        type: choice
-        options:
-          - build
-          - push
-      kubernetes_option:
-        description: "Kubernetes option"
-        default: "deploy"
-        type: choice
-        options:
-          - deploy
-          - scale
-          - delete
+          - plan    # Available only for Terraform
+          - apply   # Available for both Terraform and Docker
+          - destroy # Available only for Terraform
+          - build   # Available only for Docker
+          - push    # Available only for Docker
       environment:
         description: "Environment to deploy applications to"
         default: "qa"
@@ -57,7 +43,7 @@ jobs:
   terraform-execute:
     name: Provision Infrastructure
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'terraform' }}
+    if: "${{ github.event.inputs.actions == 'terraform' }}"
     env:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -70,11 +56,21 @@ jobs:
       STATE_KEY: ${{ vars.TF_STATE_KEY }}
       GIT_TOKEN: ${{ secrets.GH_TOKEN }}
       GITRUNNER_TOKEN: ${{ secrets.RUNNER_REGISTRATION_TOKEN }}
+    outputs:
+      ACR_REPO: ${{ steps.tf-output.outputs.ACR_REPO }}
+      ACR_USER: ${{ steps.tf-output.outputs.ACR_USER }}
+      ACR_PASS: ${{ steps.tf-output.outputs.ACR_PASSWORD }}
+      POSTGRES_PASSWORD: ${{ steps.tf-output.outputs.POSTGRES_PASSWORD }}
+      public_ip_address: ${{ steps.tf-output.outputs.public_ip_address }}
+      POSTGRES_FQDN: ${{ steps.tf-output.outputs.POSTGRES_FQDN }}
+      COSMOSDB_ACCESSKEY: ${{ steps.tf-output.outputs.COSMOSDB_ACCESSKEY }}
+      COSMOSDB_URI: ${{ steps.tf-output.outputs.COSMOSDB_URI }}
 
     defaults:
       run:
         shell: bash
         working-directory: infra
+    environment: "${{ github.event.inputs.environment }}"
 
     steps:
       - name: Checkout
@@ -85,7 +81,7 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
+      
       - name: 'Authenticate to Azure'
         uses: azure/login@v1
         with:
@@ -94,23 +90,52 @@ jobs:
           subscription-id: ${{ env.ARM_SUBSCRIPTION_ID }}
   
       - name: Terraform init
+        id: init
         run: terraform init -backend-config="resource_group_name=${{ env.RESOURCE_GROUP }}" -backend-config="storage_account_name=${{ env.STORAGE_ACCOUNT }}" -backend-config="container_name=${{env.CONTAINER_NAME}}" -backend-config="key=${{env.STATE_KEY}}" -backend-config="access_key=${{env.STORAGE_SECRET}}"
 
-      - name: Terraform ${{ github.event.inputs.terraform_option }}
-        run: terraform ${{ github.event.inputs.terraform_option }} --var-file=${{ github.event.inputs.environment }}.tfvars -var="runner_token=${{env.GITRUNNER_TOKEN}}" -auto-approve -input=false
+      - name: Terraform plan
+        id: tf-plan
+        if: "${{ github.event.inputs.option == 'plan' }}"
+        run: terraform ${{ github.event.inputs.option }} --var-file=${{ github.event.inputs.environment }}.tfvars -var="runner_token=${{env.GITRUNNER_TOKEN}}" -no-color -input=false
+  
+      - name: Terraform ${{ github.event.inputs.option }}
+        id: tf-execute
+        if: "${{ github.event.inputs.option == 'apply' || github.event.inputs.option == 'destroy' }}"
+        run: terraform ${{ github.event.inputs.option }} --var-file=${{ github.event.inputs.environment }}.tfvars -var="runner_token=${{env.GITRUNNER_TOKEN}}" -auto-approve -input=false
+
+      - name: Terraform output
+        id: tf-output
+        if: "${{ github.event.inputs.option == 'apply' }}"
+        run: |
+          repo=$(terraform output -raw acr_login_server)
+          user=$(terraform output -raw acr_admin_username)
+          pass=$(terraform output -raw acr_admin_password)
+          public_ip=$(terraform output -raw public_ip_address)
+          postgres_password=$(terraform output -raw db_password)
+          cosmosdb_accesskey=$(terraform output -raw cosmosdb_accesskey)
+          cosmosdb_uri=$(terraform output -raw cosmosdb_uri)
+          POSTGRES_FQDN_tf=$(terraform output -raw postgres_fqdn)
+
+          echo "ACR_REPO=$repo" >> "$GITHUB_OUTPUT"
+          echo "ACR_USER=$user" >> "$GITHUB_OUTPUT"
+          echo "ACR_PASSWORD=$pass" >> "$GITHUB_OUTPUT"
+          echo "POSTGRES_PASSWORD=$postgres_password" >> "$GITHUB_OUTPUT"
+          echo "COSMOSDB_ACCESSKEY=$(echo -n $cosmosdb_accesskey | base64 -w 0)" >> "$GITHUB_OUTPUT"
+          echo "COSMOSDB_URI=$cosmosdb_uri" >> "$GITHUB_OUTPUT"
+          echo "POSTGRES_FQDN=$POSTGRES_FQDN_tf" >> "$GITHUB_OUTPUT"
+          echo "public_ip_address=$public_ip" >> "$GITHUB_OUTPUT"
 
   docker-actions:
     name: Docker Actions
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'docker' }}
+    if: "${{ github.event.inputs.actions == 'docker' }}"
     environment: "${{ github.event.inputs.environment }}"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Docker Login to ACR
-        if: ${{ github.event.inputs.docker_option == 'push' }}
+        if: "${{ github.event.inputs.option == 'push' }}"
         uses: azure/docker-login@v1
         with:
           login-server: ${{ needs.terraform-execute.outputs.ACR_REPO }}
@@ -118,21 +143,20 @@ jobs:
           password: ${{ needs.terraform-execute.outputs.ACR_PASS }}
 
       - name: Build Docker image
-        if: ${{ github.event.inputs.docker_option == 'build' }}
+        if: "${{ github.event.inputs.option == 'build' }}"
         run: |
           docker build -t ${{ needs.terraform-execute.outputs.ACR_REPO }}/my-app:${{ github.sha }} .
 
       - name: Push Docker image
-        if: ${{ github.event.inputs.docker_option == 'push' }}
+        if: "${{ github.event.inputs.option == 'push' }}"
         run: |
           docker push ${{ needs.terraform-execute.outputs.ACR_REPO }}/my-app:${{ github.sha }}
 
   kubernetes-deploy:
-    name: Kubernetes Actions
+    name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'kubernetes' }}
+    needs: docker-actions
     environment: "${{ github.event.inputs.environment }}"
-    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,12 +173,6 @@ jobs:
           cluster-name: ${{ env.CLUSTER_NAME }}
           resource-group: ${{ env.RESOURCE_GROUP }}
 
-      - name: Kubernetes ${{ github.event.inputs.kubernetes_option }}
+      - name: Deploy to AKS
         run: |
-          if [ "${{ github.event.inputs.kubernetes_option }}" == "deploy" ]; then
-            kubectl apply -f k8s/deployment.yaml
-          elif [ "${{ github.event.inputs.kubernetes_option }}" == "scale" ]; then
-            kubectl scale deployment my-app --replicas=3
-          elif [ "${{ github.event.inputs.kubernetes_option }}" == "delete" ]; then
-            kubectl delete -f k8s/deployment.yaml
-          fi
+          kubectl set image deployment/my-app my-app=${{ needs.terraform-execute.outputs.ACR_REPO }}/my-app:${{ github.sha }}
